@@ -1,6 +1,9 @@
+# -*- coding: utf-8 -*-
 from __future__ import division, print_function, absolute_import
 
 import gzip
+from warnings import warn
+
 import numpy as np
 from scipy import ndimage
 from copy import copy
@@ -231,6 +234,11 @@ def renderer(background=None):
     >>> fvtk.add(r,c)
     >>> #fvtk.show(r)
     """
+
+    deprecation_msg = ("Method 'dipy.viz.window.renderer' is deprecated, instead"
+                       " use class 'dipy.viz.window.Renderer'.")
+    warn(DeprecationWarning(deprecation_msg))
+
     ren = Renderer()
     if background is not None:
         ren.SetBackground(background)
@@ -317,7 +325,7 @@ class ShowManager(object):
     interactor.
     """
 
-    def __init__(self, ren, title='DIPY', size=(300, 300),
+    def __init__(self, ren=None, title='DIPY', size=(300, 300),
                  png_magnify=1, reset_camera=True, order_transparent=False,
                  interactor_style='custom'):
 
@@ -381,7 +389,8 @@ class ShowManager(object):
         >>> # showm.render()
         >>> # showm.start()
         """
-
+        if ren is None:
+            ren = Renderer()
         self.ren = ren
         self.title = title
         self.size = size
@@ -492,7 +501,8 @@ class ShowManager(object):
             recorder.SetFileName(filename)
 
             def _stop_recording_and_close(obj, evt):
-                recorder.Stop()
+                if recorder:
+                    recorder.Stop()
                 self.iren.TerminateApp()
 
             self.iren.AddObserver("ExitEvent", _stop_recording_and_close)
@@ -503,10 +513,12 @@ class ShowManager(object):
             self.initialize()
             self.render()
             self.iren.Start()
-
+            # Deleting this object is the unique way
+            # to close the file.
+            recorder = None
             # Retrieved recorded events.
-            events = open(filename).read()
-
+            with open(filename, 'r') as f:
+                events = f.read()
         return events
 
     def record_events_to_file(self, filename="record.log"):
@@ -525,9 +537,11 @@ class ShowManager(object):
 
         # Compress file if needed
         if filename.endswith(".gz"):
-            gzip.open(filename, 'wb').write(asbytes(events))
+            with gzip.open(filename, 'wb') as fgz:
+                fgz.write(asbytes(events))
         else:
-            open(filename, 'w').write(events)
+            with open(filename, 'w') as f:
+                f.write(events)
 
     def play_events(self, events):
         """ Plays recorded events of a past interaction.
