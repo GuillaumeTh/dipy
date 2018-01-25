@@ -5,6 +5,8 @@ from dipy.core import geometry as geo
 from dipy.data import default_sphere
 from dipy.reconst import shm
 from dipy.reconst.multi_voxel import multi_voxel_fit
+from dipy.reconst import csdeconv as csd
+from scipy import optimize
 
 from ..utils.optpkg import optional_package
 
@@ -181,6 +183,13 @@ def _rank(A, tol=1e-8):
 
 
 class QpFitter(object):
+    def _lstsq_initial(self, z):
+        fodf_sh = csd._solve_cholesky(self._P, z)
+        s = np.dot(self._reg, fodf_sh)
+        init = {'x': fodf_sh,
+                's': s.clip(1e-10)}
+        return init
+
     def __init__(self, X, reg):
         self._P = P = np.dot(X.T, X)
         self._X = X
@@ -198,10 +207,33 @@ class QpFitter(object):
 
     def __call__(self, signal):
         z = np.dot(self._X.T, signal)
+        init = self._lstsq_initial(z)
 
-        x = cvxpy.Variable(self._P_py.shape[0])
-        objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, self._P_py) - z.T * x)
-        constraints = [self._reg_py * x <= self._h_py]
-        p = cvxpy.Problem(objective, constraints)
-        p.solve()
-        return np.asarray(x.value).squeeze()
+        x0 = init['x']
+
+        def loss(x, sign=1.):
+            return sign * (0.5 * np.dot(x.T, np.dot(self._P_py, x)) + np.dot(-z.T, x))
+
+        def jac(x, sign=1.):
+            return sign * (np.dot(x.T, self._P_py) + -z.T)
+
+        cons = {'type': 'ineq',
+                'fun': lambda x: 0.1 - np.dot(self._reg_py, x),
+                'jac': lambda x: -self._reg_py}
+
+        opt = {'disp': False}
+        import time
+        i = time.time()
+        res_cons = optimize.minimize(loss, x0, jac=jac, constraints=cons,
+                                     method='SLSQP', options=opt)
+        o = time.time()
+        print(o-i)
+
+        # x = cvxpy.Variable(self._P_py.shape[0])
+        # x.value = init['x']
+        # objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, self._P_py) - z.T * x)
+        # constraints = [self._reg_py * x <= 0.1]
+        # p = cvxpy.Problem(objective, constraints)
+        # import dccp
+        # p.solve(method='dccp', verbose=True)
+        return np.asarray(res_cons['x']).squeeze()
