@@ -48,7 +48,7 @@ def _expand(m, iso, coeff):
     return params
 
 
-@npt.dec.skipif(not msd.have_cvxopt)
+@npt.dec.skipif(not msd.have_cvxpy)
 def test_msd_model_delta():
     sh_order = 8
     gtab = get_3shell_gtab()
@@ -80,7 +80,7 @@ def test_msd_model_delta():
     npt.assert_array_almost_equal(fit.shm_coeff[m == 0], expected, 2)
 
 
-@npt.dec.skipif(not msd.have_cvxopt)
+@npt.dec.skipif(not msd.have_cvxpy)
 def test_MultiShellDeconvModel():
 
     gtab = get_3shell_gtab()
