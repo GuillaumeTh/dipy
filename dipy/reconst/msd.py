@@ -4,14 +4,11 @@ import numpy.linalg as la
 from dipy.core import geometry as geo
 from dipy.data import default_sphere
 from dipy.reconst import shm
-from dipy.reconst import csdeconv as csd
 from dipy.reconst.multi_voxel import multi_voxel_fit
 
 from ..utils.optpkg import optional_package
 
-cvx, have_cvxopt, _ = optional_package("cvxopt")
-if have_cvxopt:
-    cvx.solvers.options['show_progress'] = False
+cvxpy, have_cvxpy, _ = optional_package("cvxpy")
 
 sh_const = .5 / np.sqrt(np.pi)
 
@@ -92,18 +89,16 @@ def _pos_constrained_delta(iso, m, n, theta, phi, reg_sphere=default_sphere):
     c = G[0]
     a, b = G.shape
 
-    c = cvx.matrix(-c)
-    G = cvx.matrix(-G)
-    h = cvx.matrix(sh_const**2, (a, 1))
+    C = -c
+    x = cvxpy.Variable(C.shape[0])
+    objective = cvxpy.Minimize(C.T * x)
+    constraints = [-G * x <= np.full((a, 1), sh_const**2)]
+    p = cvxpy.Problem(objective, constraints)
+    p.solve(solver="SCS")
 
-    # n == 0 is set to sh_const to ensure a normalized delta function.
-    # n > 0 values are optimized so that delta > 0 on all points of the sphere
-    # and delta(theta, phi) is maximized.
-    r = cvx.solvers.lp(c, G, h)
-    x = np.asarray(r['x'])[:, 0]
     out = np.zeros(B.shape[1])
     out[n == 0] = sh_const
-    out[n != 0] = x
+    out[n != 0] = np.asarray(x.value).squeeze()
 
     iso_d = [sh_const] * iso
     return np.concatenate([iso_d, out])
@@ -186,14 +181,6 @@ def _rank(A, tol=1e-8):
 
 
 class QpFitter(object):
-
-    def _lstsq_initial(self, z):
-        fodf_sh = csd._solve_cholesky(self._P, z)
-        s = np.dot(self._reg, fodf_sh)
-        init = {'x':cvx.matrix(fodf_sh),
-                's':cvx.matrix(s.clip(1e-10))}
-        return init
-
     def __init__(self, X, reg):
         self._P = P = np.dot(X.T, X)
         self._X = X
@@ -205,18 +192,16 @@ class QpFitter(object):
         # self._P_init = np.dot(X[:, :N].T, X[:, :N])
 
         # Make cvxopt matrix types for later re-use.
-        self._P_mat = cvx.matrix(P)
-        self._reg_mat = cvx.matrix(-reg)
-        self._h_mat = cvx.matrix(0., (reg.shape[0], 1))
+        self._P_py = P
+        self._reg_py = -reg
+        self._h_py = np.full((reg.shape[0], 1), 0.)
 
     def __call__(self, signal):
         z = np.dot(self._X.T, signal)
-        init = self._lstsq_initial(z)
 
-        z_mat = cvx.matrix(-z)
-        qp = cvx.solvers.qp
-        r = qp(self._P_mat, z_mat, self._reg_mat, self._h_mat, initvals=init)
-        fodf_sh = r['x']
-        fodf_sh = np.array(fodf_sh)[:, 0]
-        return fodf_sh
-
+        x = cvxpy.Variable(self._P_py.shape[0])
+        objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, self._P_py) - z.T * x)
+        constraints = [self._reg_py * x <= self._h_py]
+        p = cvxpy.Problem(objective, constraints)
+        p.solve()
+        return np.asarray(x.value).squeeze()
