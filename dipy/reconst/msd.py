@@ -6,12 +6,15 @@ from dipy.data import default_sphere
 from dipy.reconst import shm
 from dipy.reconst.multi_voxel import multi_voxel_fit
 from dipy.reconst import csdeconv as csd
-from scipy import optimize
+import osqp
+import scipy.sparse as sparse
+import os
+import sys
 
 from ..utils.optpkg import optional_package
 
 cvxpy, have_cvxpy, _ = optional_package("cvxpy")
-
+import cvxopt as cvx
 sh_const = .5 / np.sqrt(np.pi)
 
 def multi_tissue_basis(gtab, sh_order, iso_comp):
@@ -91,16 +94,35 @@ def _pos_constrained_delta(iso, m, n, theta, phi, reg_sphere=default_sphere):
     c = G[0]
     a, b = G.shape
 
-    C = -c
-    x = cvxpy.Variable(C.shape[0])
-    objective = cvxpy.Minimize(C.T * x)
-    constraints = [-G * x <= np.full((a, 1), sh_const**2)]
-    p = cvxpy.Problem(objective, constraints)
-    p.solve(solver="SCS")
+    c = cvx.matrix(-c)
+    G = cvx.matrix(-G)
+    h = cvx.matrix(sh_const ** 2, (a, 1))
 
+    # n == 0 is set to sh_const to ensure a normalized delta function.
+    # n > 0 values are optimized so that delta > 0 on all points of the sphere
+    # and delta(theta, phi) is maximized.
+    r = cvx.solvers.lp(c, G, h)
+    x = np.asarray(r['x'])[:, 0]
     out = np.zeros(B.shape[1])
     out[n == 0] = sh_const
-    out[n != 0] = np.asarray(x.value).squeeze()
+    out[n != 0] = x
+
+    # C = -c
+    # x = cvxpy.Variable(C.shape[0])
+    # objective = cvxpy.Minimize(C.T * x)
+    # constraints = [-G * x <= np.full((a, 1), sh_const**2)]
+    # p = cvxpy.Problem(objective, constraints)
+    # p.solve(solver="CVXOPT")
+    # print(np.asarray(x.value).squeeze())
+    # prob = osqp.OSQP()
+    # prob.setup(q=C, A=sparse.csc_matrix(-G), u=np.full((a, 1), sh_const**2))
+    # res = prob.solve()
+    # print( )
+    #
+    #
+    # out = np.zeros(B.shape[1])
+    # out[n == 0] = sh_const
+    # out[n != 0] = np.asarray(x.value).squeeze()
 
     iso_d = [sh_const] * iso
     return np.concatenate([iso_d, out])
@@ -181,13 +203,12 @@ def _rank(A, tol=1e-8):
     rnk = (s > threshold).sum()
     return rnk
 
-
 class QpFitter(object):
     def _lstsq_initial(self, z):
         fodf_sh = csd._solve_cholesky(self._P, z)
         s = np.dot(self._reg, fodf_sh)
-        init = {'x': fodf_sh,
-                's': s.clip(1e-10)}
+        init = {'x': cvx.matrix(fodf_sh),
+                's': cvx.matrix(s.clip(1e-10))}
         return init
 
     def __init__(self, X, reg):
@@ -201,39 +222,50 @@ class QpFitter(object):
         # self._P_init = np.dot(X[:, :N].T, X[:, :N])
 
         # Make cvxopt matrix types for later re-use.
-        self._P_py = P
-        self._reg_py = -reg
-        self._h_py = np.full((reg.shape[0], 1), 0.)
+        self._P_mat = cvx.matrix(P)
+        self._reg_mat = cvx.matrix(-reg)
+        self._h_mat = cvx.matrix(0., (reg.shape[0], 1))
 
     def __call__(self, signal):
         z = np.dot(self._X.T, signal)
         init = self._lstsq_initial(z)
 
-        x0 = init['x']
-
-        def loss(x, sign=1.):
-            return sign * (0.5 * np.dot(x.T, np.dot(self._P_py, x)) + np.dot(-z.T, x))
-
-        def jac(x, sign=1.):
-            return sign * (np.dot(x.T, self._P_py) + -z.T)
-
-        cons = {'type': 'ineq',
-                'fun': lambda x: 0.1 - np.dot(self._reg_py, x),
-                'jac': lambda x: -self._reg_py}
-
-        opt = {'disp': False}
-        import time
-        i = time.time()
-        res_cons = optimize.minimize(loss, x0, jac=jac, constraints=cons,
-                                     method='SLSQP', options=opt)
-        o = time.time()
-        print(o-i)
-
-        # x = cvxpy.Variable(self._P_py.shape[0])
-        # x.value = init['x']
-        # objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, self._P_py) - z.T * x)
-        # constraints = [self._reg_py * x <= 0.1]
-        # p = cvxpy.Problem(objective, constraints)
-        # import dccp
-        # p.solve(method='dccp', verbose=True)
-        return np.asarray(res_cons['x']).squeeze()
+        z_mat = cvx.matrix(-z)
+        qp = cvx.solvers.qp
+        r = qp(self._P_mat, z_mat, self._reg_mat, self._h_mat,
+               initvals=init)
+        fodf_sh = r['x']
+        fodf_sh = np.array(fodf_sh)[:, 0]
+        return fodf_sh
+# class QpFitter(object):
+#     def _lstsq_initial(self, z):
+#         fodf_sh = csd._solve_cholesky(self._P, z)
+#         s = np.dot(self._reg, fodf_sh)
+#         init = {'x': fodf_sh,
+#                 's': s.clip(1e-10)}
+#         return init
+#
+#     def __init__(self, X, reg):
+#         self._P = P = np.dot(X.T, X)
+#         self._X = X
+#
+#         # No super res for now.
+#         assert _rank(P) == P.shape[0]
+#
+#         self._reg = reg
+#         # self._P_init = np.dot(X[:, :N].T, X[:, :N])
+#
+#         # Make cvxopt matrix types for later re-use.
+#         self._P_py = P
+#         self._reg_py = -reg
+#         self._h_py = np.full((reg.shape[0], 1), 0.)
+#
+#     def __call__(self, signal):
+#         z = np.dot(self._X.T, signal)
+#         sh, _ = csd.csdeconv(signal, self._X, self._reg, tau=0.1, P=self._P)
+#         sys.stdout = open(os.devnull, 'w')
+#         prob = osqp.OSQP()
+#         prob.setup(P=sparse.csc_matrix(self._P_py), q=-z, A=sparse.csc_matrix(self._reg_py), u=np.full(self._reg_py.shape[0], 0.))
+#         res = prob.solve()
+#         sys.stdout = sys.__stdout__
+#         return sh

@@ -102,6 +102,7 @@ def test_MultiShellDeconvModel():
     vf = [1.3, .8, 1.9]
     signal = sum(i * j for i, j in zip(vf, [S_csf, S_gm, S_wm]))
     fit = model.fit(signal)
+    print(fit.volume_fractions)
 
     npt.assert_array_almost_equal(fit.volume_fractions, vf, 4)
 
